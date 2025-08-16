@@ -90,12 +90,7 @@ class HttpClient:
         # Simple exponential backoff on 5xx & connection errors
         for attempt in range(1, self.max_retries + 1):
             try:
-                print(f"HTTP POST to: {url}")
-                print(f"HTTP headers: {headers}")
-                print(f"HTTP payload: {payload}")
                 resp = await self._client.post(url, headers=headers, json=payload)
-                print(f"HTTP response status: {resp.status_code}")
-                print(f"HTTP response headers: {dict(resp.headers)}")
                 if resp.status_code >= 500:
                     raise httpx.HTTPError(f"Server error {resp.status_code}")
                 return resp
@@ -287,11 +282,28 @@ class RestRequest(Model):
     opensea_tool: Optional[str] = None
     tool_args: Dict[str, Any] = {}
 
+class PortfolioRequest(Model):
+    wallet_address: str
+    include_items: bool = True
+    include_collections: bool = True
+    include_activity: bool = False
+    include_listings: bool = False
+    include_offers: bool = False
+    include_balances: bool = True
+    include_favorites: bool = False
+
 class RestResponse(Model):
     timestamp: int
     answer: str
     used_tool: Optional[str] = None
     tool_result: Optional[Dict[str, Any]] = None
+    agent_address: str
+
+class PortfolioResponse(Model):
+    timestamp: int
+    wallet_address: str
+    portfolio_data: Dict[str, Any]
+    summary: str
     agent_address: str
 
 # ----------------------------
@@ -311,7 +323,6 @@ async def maybe_fetch_opensea_context(tool_name: Optional[str], tool_args: Dict[
     # Only initialize MCP if not already done
     global _mcp_initialized
     if not _mcp_initialized:
-        print("MCP not initialized, initializing MCP connection...")
         try:
             logger.info("Initializing MCP connection...")
             await MCP.initialize()
@@ -332,15 +343,53 @@ async def maybe_fetch_opensea_context(tool_name: Optional[str], tool_args: Dict[
     return result
 
 async def answer_with_asi(prompt: str, context_blob: Optional[Dict[str, Any]]) -> str:
-    messages: List[Dict[str, str]] = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-    ]
+    # Build the system message content
+    system_content = SYSTEM_PROMPT
+    
     if context_blob:
-        # Keep context compact
+        # Add context to the system message (not as a separate message)
         ctx_str = json.dumps(context_blob)[:4000]
-        messages.append({"role": "system", "content": f"OpenSea context:\n{ctx_str}"})
-    messages.append({"role": "user", "content": prompt})
+        system_content += f"\n\nOpenSea context:\n{ctx_str}"
+    
+    messages: List[Dict[str, str]] = [
+        {"role": "system", "content": system_content},
+        {"role": "user", "content": prompt}
+    ]
+    
     return await ASI.chat(messages)
+
+async def fetch_comprehensive_portfolio(wallet_address: str) -> Dict[str, Any]:
+    """Fetch portfolio data from multiple OpenSea tools in parallel"""
+    
+    # Define all the tool calls to execute in parallel
+    tasks = [
+        # Tool 1: Get token balances (ERC-20 tokens, ETH, etc.)
+        maybe_fetch_opensea_context("get_token_balances", {
+            "address": wallet_address
+        }),
+        
+        # Tool 2: Get NFT balances (NFTs owned)
+        maybe_fetch_opensea_context("get_nft_balances", {
+            "address": wallet_address
+        })
+    ]
+    
+    # Execute all tasks in parallel for better performance
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    # Combine results, handling any failures gracefully
+    portfolio_data = {}
+    tool_names = ["token_balances", "nft_balances"]
+    
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            logger.warning(f"Tool {tool_names[i]} failed: {result}")
+            portfolio_data[tool_names[i]] = None
+        else:
+            portfolio_data[tool_names[i]] = result
+            logger.info(f"{tool_names[i]} data fetched successfully")
+    
+    return portfolio_data
 
 # ----------------------------
 # FastAPI app for health checks
@@ -374,7 +423,6 @@ async def on_startup(ctx: Context):
     # Warm up MCP, log available tools (non-fatal)
     try:
         global _mcp_initialized
-        print("MCP not initialized, initializing MCP connection in startup...")
         await MCP.initialize()
         _mcp_initialized = True
     except Exception as e:
@@ -417,6 +465,52 @@ async def handle_rest_query(ctx: Context, req: RestRequest) -> RestResponse:
             answer=f"Sorry—something went wrong: {e}",
             used_tool=None,
             tool_result=None,
+            agent_address=ctx.agent.address
+        )
+
+@agent.on_rest_post("/portfolio", PortfolioRequest, PortfolioResponse)
+async def handle_portfolio_query(ctx: Context, req: PortfolioRequest) -> PortfolioResponse:
+    """Handle portfolio queries using OpenSea's get_profile tool"""
+    try:
+        ctx.logger.info(f"Received portfolio query for wallet: {req.wallet_address}")
+        
+        # Build tool arguments for get_profile
+        tool_args = {
+            "address": req.wallet_address,
+            "include_items": True,
+            "include_collections": True,
+            "include_activity": True,
+            "include_listings": True,
+            "include_offers": True,
+            "include_balances": True,
+            "include_favorites": True
+        }
+        
+        # Fetch comprehensive portfolio data from multiple OpenSea tools
+        portfolio_data = await fetch_comprehensive_portfolio(req.wallet_address)
+        if portfolio_data:
+            # Generate a summary using ASI:One
+            summary_prompt = f"Analyze this portfolio data for wallet {req.wallet_address} and provide a concise summary highlighting: 1) Token balances and values, 2) NFT holdings and collections, 3) Total portfolio value, and 4) Key insights about the wallet's crypto strategy."
+            summary = await answer_with_asi(summary_prompt, portfolio_data)
+        else:
+            summary = f"No portfolio data found for wallet {req.wallet_address}"
+            portfolio_data = {}
+        
+        return PortfolioResponse(
+            timestamp=int(time.time()),
+            wallet_address=req.wallet_address,
+            portfolio_data=portfolio_data,
+            summary=summary,
+            agent_address=ctx.agent.address
+        )
+        
+    except Exception as e:
+        logger.exception("Failed to handle portfolio query")
+        return PortfolioResponse(
+            timestamp=int(time.time()),
+            wallet_address=req.wallet_address,
+            portfolio_data={},
+            summary=f"Sorry—something went wrong: {e}",
             agent_address=ctx.agent.address
         )
 
