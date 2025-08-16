@@ -54,7 +54,7 @@ class Settings:
     agent_name: str = os.getenv("AGENT_NAME", "LabuBank")
     agent_seed: str = os.getenv("AGENT_SEED", "labubank_mcp_agent")
     agent_port: int = int(os.getenv("AGENT_PORT", "8000"))
-    agent_endpoint: str = os.getenv("AGENT_ENDPOINT", "http://localhost:8000/query")
+    agent_endpoint: str = os.getenv("AGENT_ENDPOINT", "http://159.203.68.59:8000/query")
 
 SETTINGS = Settings()
 
