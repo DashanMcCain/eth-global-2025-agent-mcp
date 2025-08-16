@@ -3,12 +3,20 @@ import json
 import uuid
 import asyncio
 import logging
+import threading
+import time
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass
-from pydantic import Field
-import httpx
-
+# from pydantic import Field  # Commented out due to v1/v2 compatibility issues
 from uagents import Agent, Context, Model
+import httpx
+from fastapi import FastAPI
+import uvicorn
+from dotenv import load_dotenv
+
+
+# Load environment variables from .env file
+load_dotenv()
 
 # ----------------------------
 # Configuration & Environment
@@ -39,15 +47,15 @@ class Settings:
     asi_temperature: float = float(os.getenv("ASI_ONE_TEMPERATURE", "0.2"))
 
     # MCP (OpenSea)
-    mcp_url: str = env("OPENSEA_MCP_URL", required=False, default="https://mcp.opensea.io/mcp")
     mcp_api_key: Optional[str] = os.getenv("OPENSEA_API_KEY")
+    mcp_url: str = env("OPENSEA_MCP_URL", required=False, default="https://mcp.opensea.io/mcp")
     mcp_origin: str = os.getenv("MCP_ORIGIN", DEFAULT_MCP_ORIGIN)
 
     # Agent
     agent_name: str = os.getenv("AGENT_NAME", "LabuBank")
     agent_seed: str = os.getenv("AGENT_SEED", "labubank_mcp_agent")
-    agent_port: int = int(os.getenv("AGENT_PORT", "8000"))
-    agent_endpoint: str = os.getenv("AGENT_ENDPOINT", f"http://localhost:{os.getenv('AGENT_PORT','8000')}/submit")
+    agent_port: int = int(os.getenv("AGENT_PORT", "8011"))
+    agent_endpoint: str = os.getenv("AGENT_ENDPOINT", "http://0.0.0.0:8011/query")
 
 SETTINGS = Settings()
 
@@ -82,7 +90,12 @@ class HttpClient:
         # Simple exponential backoff on 5xx & connection errors
         for attempt in range(1, self.max_retries + 1):
             try:
+                print(f"HTTP POST to: {url}")
+                print(f"HTTP headers: {headers}")
+                print(f"HTTP payload: {payload}")
                 resp = await self._client.post(url, headers=headers, json=payload)
+                print(f"HTTP response status: {resp.status_code}")
+                print(f"HTTP response headers: {dict(resp.headers)}")
                 if resp.status_code >= 500:
                     raise httpx.HTTPError(f"Server error {resp.status_code}")
                 return resp
@@ -162,6 +175,7 @@ class MCPClient:
             "Content-Type": "application/json",
             "Origin": self.origin,
         }
+        # Only add session ID after initialization
         if self.session_id:
             headers["Mcp-Session-Id"] = self.session_id
         # Recommended by spec post-init:
@@ -189,10 +203,7 @@ class MCPClient:
         sid = resp.headers.get("Mcp-Session-Id")
         if sid:
             self.session_id = sid
-        data = resp.json()
-        if "error" in data:
-            raise RuntimeError(f"MCP initialize error: {data['error']}")
-        return data.get("result", {})
+        return sid
 
     async def list_tools(self) -> List[Dict[str, Any]]:
         payload = {
@@ -250,23 +261,38 @@ class MCPClient:
             except json.JSONDecodeError:
                 continue
         raise RuntimeError("MCP SSE ended without a result.")
+    
+
 
 MCP = MCPClient(SETTINGS.mcp_url, SETTINGS.mcp_api_key, SETTINGS.mcp_origin)
+_mcp_initialized = False  # Track MCP initialization status
 
 # ----------------------------
 # uAgents message schemas
 # ----------------------------
 
 class UserQuery(Model):
-    prompt: str = Field(..., description="User's request in plain English")
-    # If you know the tool you want, pass it; otherwise agent can skip tools
-    opensea_tool: Optional[str] = Field(None, description="MCP tool name to call (e.g., 'collections.search')")
-    tool_args: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Arguments to MCP tool")
+    prompt: str
+    opensea_tool: Optional[str] = None
+    tool_args: Dict[str, Any] = {}
 
 class AgentReply(Model):
     answer: str
     used_tool: Optional[str] = None
     tool_result: Optional[Dict[str, Any]] = None
+
+
+class RestRequest(Model):
+    prompt: str
+    opensea_tool: Optional[str] = None
+    tool_args: Dict[str, Any] = {}
+
+class RestResponse(Model):
+    timestamp: int
+    answer: str
+    used_tool: Optional[str] = None
+    tool_result: Optional[Dict[str, Any]] = None
+    agent_address: str
 
 # ----------------------------
 # Orchestration
@@ -281,12 +307,20 @@ SYSTEM_PROMPT = (
 async def maybe_fetch_opensea_context(tool_name: Optional[str], tool_args: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not tool_name:
         return None
-    # Ensure MCP init happened
-    try:
-        await MCP.initialize()
-    except Exception as e:
-        logger.error(f"MCP initialize failed: {e}")
-        raise
+    
+    # Only initialize MCP if not already done
+    global _mcp_initialized
+    if not _mcp_initialized:
+        print("MCP not initialized, initializing MCP connection...")
+        try:
+            logger.info("Initializing MCP connection...")
+            await MCP.initialize()
+            _mcp_initialized = True
+            logger.info("MCP initialization successful")
+        except Exception as e:
+            logger.error(f"MCP initialize failed: {e}")
+            # Don't reset the flag on failure - let it retry next time
+            raise
 
     # Optional: validate tool exists
     tools = await MCP.list_tools()
@@ -309,6 +343,16 @@ async def answer_with_asi(prompt: str, context_blob: Optional[Dict[str, Any]]) -
     return await ASI.chat(messages)
 
 # ----------------------------
+# FastAPI app for health checks
+# ----------------------------
+
+app = FastAPI()
+
+@app.get("/ping")
+async def ping():
+    return {"status": "agent is running"}
+
+# ----------------------------
 # uAgent definition & handlers
 # ----------------------------
 
@@ -329,11 +373,13 @@ async def on_startup(ctx: Context):
     )
     # Warm up MCP, log available tools (non-fatal)
     try:
+        global _mcp_initialized
+        print("MCP not initialized, initializing MCP connection in startup...")
         await MCP.initialize()
-        tools = await MCP.list_tools()
-        ctx.logger.info(f"MCP ready. Tools discovered: {[t.get('name') for t in tools]}")
+        _mcp_initialized = True
     except Exception as e:
         ctx.logger.warning(f"MCP not ready yet or unreachable: {e}")
+        _mcp_initialized = False
 
 @agent.on_message(model=UserQuery, replies=AgentReply)
 async def on_user_query(ctx: Context, msg: UserQuery):
@@ -348,8 +394,41 @@ async def on_user_query(ctx: Context, msg: UserQuery):
         reply = AgentReply(answer=f"Sorry—something went wrong: {e}")
         await ctx.send(ctx.sender, reply)
 
-if __name__ == "__main__":
+@agent.on_rest_post("/query", RestRequest, RestResponse)
+async def handle_rest_query(ctx: Context, req: RestRequest) -> RestResponse:
+    """Handle HTTP POST requests to /query endpoint"""
     try:
-        agent.run()
+        ctx.logger.info(f"Received REST query: {req.prompt}")
+        context = await maybe_fetch_opensea_context(req.opensea_tool, req.tool_args or {})
+        answer = await answer_with_asi(req.prompt, context)
+        
+        # Return the response directly
+        return RestResponse(
+            timestamp=int(time.time()),
+            answer=answer,
+            used_tool=req.opensea_tool,
+            tool_result=context,
+            agent_address=ctx.agent.address
+        )
+    except Exception as e:
+        logger.exception("Failed to handle REST query")
+        return RestResponse(
+            timestamp=int(time.time()),
+            answer=f"Sorry—something went wrong: {e}",
+            used_tool=None,
+            tool_result=None,
+            agent_address=ctx.agent.address
+        )
+
+# --- MAIN (run servers on different ports) ---
+def run_agent():
+    try:
+        agent.run()  # uAgents inbox on 8011
     finally:
         asyncio.run(HTTP.aclose())
+
+if __name__ == "__main__":
+    # Run agent in a separate thread
+    threading.Thread(target=run_agent, daemon=True).start()
+    # Run FastAPI server on 8000
+    uvicorn.run(app, host="0.0.0.0", port=8000)
