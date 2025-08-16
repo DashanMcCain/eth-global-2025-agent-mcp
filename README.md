@@ -66,6 +66,39 @@ Send queries to the agent via HTTP POST:
 }
 ```
 
+### POST `/portfolio`
+
+Get comprehensive portfolio information for a wallet address:
+
+**Request Body:**
+
+```json
+{
+  "wallet_address": "0x1234567890abcdef...",
+  "include_items": true,
+  "include_collections": true,
+  "include_activity": false,
+  "include_listings": false,
+  "include_offers": false,
+  "include_balances": true,
+  "include_favorites": false
+}
+```
+
+**Response:**
+
+```json
+{
+  "timestamp": 1709312457,
+  "wallet_address": "0x1234567890abcdef...",
+  "portfolio_data": {
+    /* OpenSea profile data */
+  },
+  "summary": "AI-generated portfolio analysis...",
+  "agent_address": "agent1qv3h4tkmvqz8jn8hs7q7y9rg8yh6jzfz7yf3xm2x2z7y8q9w2j5q9n8h6j"
+}
+```
+
 ## Environment Variables
 
 - `ASI_ONE_API_KEY`: Required - Your ASI:One API key
