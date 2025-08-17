@@ -16,7 +16,7 @@ async def test_agent():
         # Test 1: Health endpoint
         print("\n1️⃣ Testing health endpoint...")
         try:
-            response = await client.get("http://localhost:8000/health")
+            response = await client.get("http://159.203.68.59:8000/health")
             if response.status_code == 200:
                 data = response.json()
                 print(f"✅ Health check passed: {data['status']}")
@@ -36,7 +36,7 @@ async def test_agent():
         try:
             print("📤 Sending general query to agent...")
             response = await client.post(
-                "http://localhost:8000/query",
+                "http://159.203.68.59:8000/query",
                 json=query1,
                 timeout=30.0
             )
@@ -60,7 +60,7 @@ async def test_agent():
         try:
             print("📤 Sending collection query...")
             response = await client.post(
-                "http://localhost:8000/query",
+                "http://159.203.68.59:8000/query",
                 json=query3,
                 timeout=30.0
             )
@@ -84,7 +84,7 @@ async def test_agent():
         try:
             print("📤 Sending trending query...")
             response = await client.post(
-                "http://localhost:8000/query",
+                "http://159.203.68.59:8000/query",
                 json=query4,
                 timeout=30.0
             )
@@ -108,7 +108,7 @@ async def test_agent():
         try:
             print("📤 Sending swap query...")
             response = await client.post(
-                "http://localhost:8000/query",
+                "http://159.203.68.59:8000/query",
                 json=query5,
                 timeout=30.0
             )
@@ -132,7 +132,7 @@ async def test_agent():
         try:
             print("📤 Sending complex query...")
             response = await client.post(
-                "http://localhost:8000/query",
+                "http://159.203.68.59:8000/query",
                 json=query6,
                 timeout=45.0
             )
@@ -156,7 +156,7 @@ async def test_agent():
         try:
             print("📤 Sending LLM-specific query...")
             response = await client.post(
-                "http://localhost:8000/query",
+                "http://159.203.68.59:8000/query",
                 json=query7,
                 timeout=45.0
             )
@@ -180,7 +180,7 @@ async def test_agent():
         try:
             print("📤 Sending ambiguous query...")
             response = await client.post(
-                "http://localhost:8000/query",
+                "http://159.203.68.59:8000/query",
                 json=query8,
                 timeout=45.0
             )
@@ -204,7 +204,7 @@ async def test_agent():
         try:
             print("📤 Sending portfolio query...")
             response = await client.post(
-                "http://localhost:8000/portfolio",
+                "http://159.203.68.59:8000/portfolio",
                 json=portfolio_request,
                 timeout=60.0  # Longer timeout for portfolio queries
             )
